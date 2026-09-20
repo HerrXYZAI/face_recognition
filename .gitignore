@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Claude Code local session state -- not part of the project
+.claude/
+
+# Local machine config and outputs -- never contain real paths / data in git
+config.yaml
+docker/.env
+data/
+models/
+!data/.gitkeep
+!models/.gitkeep

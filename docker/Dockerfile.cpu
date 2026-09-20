@@ -1,0 +1,24 @@
+# CPU-only image: same code as Dockerfile.gpu but with plain onnxruntime.
+# Use this if the target machine has no NVIDIA GPU / Container Toolkit.
+# Inference will be significantly slower over 100k images.
+FROM python:3.11-slim
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgl1 libglib2.0-0 \
+        exiftool \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY pyproject.toml ./
+COPY face_pipeline ./face_pipeline
+
+RUN python3 -m pip install --upgrade pip \
+    && python3 -m pip install . \
+    && python3 -m pip install "onnxruntime>=1.17"
+
+ENTRYPOINT ["face-pipeline"]

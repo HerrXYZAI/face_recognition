@@ -1,0 +1,52 @@
+# Usage (from the repo root):
+#   cp docker/.env.example docker/.env   # fill in your host paths
+#   cp config.example.yaml config.yaml   # paths below already match the mounts
+#
+#   docker compose -f docker/docker-compose.yml --profile gpu build
+#   docker compose -f docker/docker-compose.yml --profile gpu run --rm pipeline-gpu inspect-catalog
+#   docker compose -f docker/docker-compose.yml --profile gpu run --rm pipeline-gpu export-faces
+#   ...
+#
+# No NVIDIA GPU? Swap `--profile gpu` / `pipeline-gpu` for `--profile cpu` / `pipeline-cpu`.
+#
+# config.yaml (mounted read-only) should reference the container-side mount
+# points used below, i.e.:
+#   lightroom.catalog_copy_path: /data/lightroom/catalog.lrcat
+#   images.root: /data/images
+
+x-common: &common
+  build:
+    context: ..
+  working_dir: /app
+  volumes:
+    - ../config.yaml:/app/config.yaml:ro
+    - ../data:/app/data
+    - ../models:/app/models
+    - ${IMAGES_ROOT_HOST}:/data/images
+    - ${CATALOG_COPY_DIR_HOST}:/data/lightroom
+    - insightface-cache:/root/.insightface
+
+services:
+  pipeline-gpu:
+    <<: *common
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.gpu
+    profiles: ["gpu"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  pipeline-cpu:
+    <<: *common
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.cpu
+    profiles: ["cpu"]
+
+volumes:
+  insightface-cache:

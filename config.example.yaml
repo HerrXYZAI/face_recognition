@@ -1,0 +1,43 @@
+# Copy this file to config.yaml and fill in the paths for your machine.
+# config.yaml is gitignored so your local paths never get committed.
+#
+# Running via Docker (see docker/docker-compose.yml)? The compose file bind-
+# mounts your host folders to fixed container paths, so use those instead of
+# your real host paths here:
+#   catalog_copy_path: /data/lightroom/catalog.lrcat
+#   images.root: /data/images
+# The example paths below are for running the CLI directly on the host
+# (outside Docker) instead.
+
+lightroom:
+  # A COPY of your Lightroom Classic catalog file, not the live one Lightroom
+  # has open (it locks the file). Example: make a copy with Lightroom closed,
+  # or use File > Optimize/Back Up Catalog, then point this at the backup.
+  catalog_copy_path: "D:/lightroom/catalog_copy/catalog.lrcat"
+
+images:
+  # Root folder that contains your photo library (same files referenced by
+  # the Lightroom catalog). Used for step 3 (inference) and step 4 (XMP write).
+  root: "D:/photos"
+
+data:
+  # Where pipeline outputs are stored. Created automatically if missing.
+  labeled_faces_csv: "data/labeled_faces.csv"
+  faces_db: "data/faces.db"
+  classifier_path: "models/classifier.pkl"
+
+recognition:
+  # insightface model pack name; buffalo_l is the recommended accuracy/speed
+  # balance. Downloaded automatically on first use and cached in the
+  # model-cache volume.
+  model_name: "buffalo_l"
+  # ctx_id: 0 = first GPU, -1 = CPU
+  ctx_id: 0
+  detector_size: [640, 640]
+  # Faces classified below this probability are stored as "unknown" instead
+  # of being assigned to a person.
+  min_confidence: 0.55
+
+xmp:
+  # Only write regions for faces at or above this confidence.
+  min_confidence: 0.6
