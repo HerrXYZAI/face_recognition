@@ -1,7 +1,11 @@
 # GPU image: CUDA runtime + onnxruntime-gpu for InsightFace, exiftool for
-# Step 4 XMP writing. Requires the NVIDIA Container Toolkit on the host
-# (see README.md) -- otherwise use Dockerfile.cpu.
-FROM nvidia/cuda:12.4.1-cudnn-runtime-ubuntu22.04
+# Step 4 XMP writing. Requires the NVIDIA Container Toolkit and a host driver
+# >=580.65.06 on the host (see README.md) -- otherwise use Dockerfile.cpu.
+#
+# onnxruntime-gpu >=1.27 ships built against CUDA 13, so this base image has
+# to track that major version -- an onnxruntime-gpu built for CUDA 13 will
+# fail to load its CUDA execution provider against a CUDA 12 runtime.
+FROM nvidia/cuda:13.0.0-cudnn-runtime-ubuntu22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
@@ -21,7 +25,7 @@ COPY pyproject.toml ./
 COPY face_pipeline ./face_pipeline
 
 RUN python3 -m pip install --upgrade pip \
-    && python3 -m pip install . \
+    && python3 -m pip install ".[review]" \
     && python3 -m pip install "onnxruntime-gpu>=1.17"
 
 ENTRYPOINT ["face-pipeline"]

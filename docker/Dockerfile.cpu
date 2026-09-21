@@ -18,7 +18,7 @@ COPY pyproject.toml ./
 COPY face_pipeline ./face_pipeline
 
 RUN python3 -m pip install --upgrade pip \
-    && python3 -m pip install . \
+    && python3 -m pip install ".[review]" \
     && python3 -m pip install "onnxruntime>=1.17"
 
 ENTRYPOINT ["face-pipeline"]

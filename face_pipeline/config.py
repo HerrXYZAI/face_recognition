@@ -13,6 +13,7 @@ DEFAULT_CONFIG_PATH = Path(os.environ.get("FACE_PIPELINE_CONFIG", "config.yaml")
 @dataclass
 class RecognitionConfig:
     model_name: str = "buffalo_l"
+    model_root: str = "models/insightface"
     ctx_id: int = 0
     detector_size: tuple[int, int] = (640, 640)
     min_confidence: float = 0.55
@@ -47,6 +48,7 @@ class Config:
 
         rec_cfg = RecognitionConfig(
             model_name=recognition.get("model_name", "buffalo_l"),
+            model_root=recognition.get("model_root", "models/insightface"),
             ctx_id=int(recognition.get("ctx_id", 0)),
             detector_size=tuple(recognition.get("detector_size", [640, 640])),
             min_confidence=float(recognition.get("min_confidence", 0.55)),

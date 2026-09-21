@@ -31,6 +31,9 @@ recognition:
   # balance. Downloaded automatically on first use and cached in the
   # model-cache volume.
   model_name: "buffalo_l"
+  # Where InsightFace stores/downloads model weights. Defaults to a
+  # project-local folder (already gitignored) instead of ~/.insightface.
+  model_root: "models/insightface"
   # ctx_id: 0 = first GPU, -1 = CPU
   ctx_id: 0
   detector_size: [640, 640]
@@ -39,5 +42,8 @@ recognition:
   min_confidence: 0.55
 
 xmp:
-  # Only write regions for faces at or above this confidence.
+  # Default minimum confidence for a face to show up in `review-faces`
+  # (adjustable per-session in the UI itself). write-xmp itself only writes
+  # faces that were approved via review-faces, regardless of this value --
+  # a human approval is a stronger signal than the raw confidence score.
   min_confidence: 0.6

@@ -36,12 +36,28 @@ CREATE TABLE IF NOT EXISTS faces (
     person_name TEXT NOT NULL,
     confidence REAL NOT NULL,
     detector_score REAL NOT NULL,
-    model_version TEXT NOT NULL
+    model_version TEXT NOT NULL,
+    review_status TEXT NOT NULL DEFAULT 'pending',
+    reviewed_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_faces_image_id ON faces(image_id);
 CREATE INDEX IF NOT EXISTS idx_faces_person_name ON faces(person_name);
 """
+
+REVIEW_STATUSES = {"pending", "approved", "rejected"}
+UNKNOWN_NAME = "unknown"
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Adds columns introduced after a faces.db may already have been
+    created, so existing databases pick them up instead of erroring."""
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(faces)")}
+    if "review_status" not in cols:
+        conn.execute("ALTER TABLE faces ADD COLUMN review_status TEXT NOT NULL DEFAULT 'pending'")
+    if "reviewed_at" not in cols:
+        conn.execute("ALTER TABLE faces ADD COLUMN reviewed_at TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_faces_review_status ON faces(review_status)")
 
 
 @contextmanager
@@ -51,6 +67,7 @@ def connect(db_path: Path) -> Iterator[sqlite3.Connection]:
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     try:
         yield conn
         conn.commit()
@@ -99,20 +116,22 @@ def insert_face(
     )
 
 
-def iter_faces_for_xmp(conn: sqlite3.Connection, min_confidence: float):
+def iter_faces_for_xmp(conn: sqlite3.Connection):
     """Yields (image_path, width, height, [(person_name, left, top, right, bottom), ...])
-    for every image that has at least one face at or above min_confidence --
-    used by Step 4's XMP writer. Bounding boxes are converted from the pixel
-    coordinates stored in `faces` to the fractional (0..1) coordinates the
-    MWG region writer expects."""
+    for every image that has at least one *approved* face -- used by the
+    write-xmp step. Only faces a human has approved via `review-faces` are
+    written; a face's automatic classification confidence no longer gates
+    this on its own, since approval is a strictly stronger signal (it can
+    also rescue a low-confidence face the classifier under-scored). Bounding
+    boxes are converted from the pixel coordinates stored in `faces` to the
+    fractional (0..1) coordinates the MWG region writer expects."""
     rows = conn.execute(
         """SELECT img.path AS path, img.width AS width, img.height AS height,
                   f.person_name AS person_name, f.left AS left, f.top AS top,
                   f.right AS right, f.bottom AS bottom, f.confidence AS confidence
            FROM faces f JOIN images img ON img.id = f.image_id
-           WHERE f.person_name != 'unknown' AND f.confidence >= ?
+           WHERE f.review_status = 'approved' AND f.person_name != 'unknown'
            ORDER BY img.path""",
-        (min_confidence,),
     ).fetchall()
 
     current_path = None
@@ -131,3 +150,83 @@ def iter_faces_for_xmp(conn: sqlite3.Connection, min_confidence: float):
         current_faces.append((row["person_name"], left, top, right, bottom))
     if current_path is not None:
         yield current_path, current_dims[0], current_dims[1], current_faces
+
+
+def iter_faces_for_review(
+    conn: sqlite3.Connection,
+    review_status: str = "pending",
+    min_confidence: float = 0.0,
+    person_name: Optional[str] = None,
+) -> list[sqlite3.Row]:
+    """Returns candidate faces for the review UI: id, image path/dimensions,
+    bounding box, predicted name, and both confidence scores. Ordered lowest
+    classifier-confidence first, since those predictions are the most likely
+    to be wrong and so the most worth a human's attention first."""
+    query = (
+        "SELECT f.id AS id, img.path AS path, img.width AS width, img.height AS height, "
+        "f.left AS left, f.top AS top, f.right AS right, f.bottom AS bottom, "
+        "f.person_name AS person_name, f.confidence AS confidence, "
+        "f.detector_score AS detector_score "
+        "FROM faces f JOIN images img ON img.id = f.image_id "
+        "WHERE f.review_status = ? AND f.confidence >= ?"
+    )
+    params: list = [review_status, min_confidence]
+    if person_name is not None:
+        query += " AND f.person_name = ?"
+        params.append(person_name)
+    query += " ORDER BY f.confidence ASC, img.path"
+    return conn.execute(query, params).fetchall()
+
+
+def set_review_status(
+    conn: sqlite3.Connection,
+    face_id: int,
+    review_status: str,
+    person_name: Optional[str] = None,
+    reviewed_at: Optional[str] = None,
+) -> None:
+    """Records a human review decision for one face. Passing `person_name`
+    also corrects the classifier's predicted label (used when the reviewer
+    relabels a misidentified or previously-unknown face)."""
+    if review_status not in REVIEW_STATUSES:
+        raise ValueError(f"Invalid review_status: {review_status!r} (expected one of {REVIEW_STATUSES})")
+    if review_status == "approved" and (person_name or "").strip().lower() == UNKNOWN_NAME:
+        raise ValueError("Cannot approve a face labeled 'unknown' -- assign a real name first, or reject it instead.")
+
+    if person_name is not None:
+        conn.execute(
+            "UPDATE faces SET review_status = ?, person_name = ?, reviewed_at = ? WHERE id = ?",
+            (review_status, person_name, reviewed_at, face_id),
+        )
+    else:
+        conn.execute(
+            "UPDATE faces SET review_status = ?, reviewed_at = ? WHERE id = ?",
+            (review_status, reviewed_at, face_id),
+        )
+
+
+def get_review_state(conn: sqlite3.Connection, face_id: int) -> Optional[sqlite3.Row]:
+    """Returns a face's current (review_status, person_name, reviewed_at) --
+    used by the review UI to snapshot a face's state before changing it, so
+    an "undo" can restore exactly what was there before."""
+    return conn.execute(
+        "SELECT review_status, person_name, reviewed_at FROM faces WHERE id = ?", (face_id,)
+    ).fetchone()
+
+
+def distinct_person_names(conn: sqlite3.Connection) -> list[str]:
+    """Every real (non-'unknown') person name currently in faces.db, for
+    populating the review UI's relabel dropdown."""
+    rows = conn.execute(
+        "SELECT DISTINCT person_name FROM faces WHERE person_name != 'unknown' ORDER BY person_name"
+    ).fetchall()
+    return [row["person_name"] for row in rows]
+
+
+def review_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    """Face counts per review_status, e.g. for the `status` CLI command and
+    the review UI's progress readout."""
+    counts = {status: 0 for status in REVIEW_STATUSES}
+    for row in conn.execute("SELECT review_status, COUNT(*) AS n FROM faces GROUP BY review_status"):
+        counts[row["review_status"]] = row["n"]
+    return counts

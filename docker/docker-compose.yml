@@ -13,18 +13,24 @@
 # points used below, i.e.:
 #   lightroom.catalog_copy_path: /data/lightroom/catalog.lrcat
 #   images.root: /data/images
+#
+# review-faces (the browser verification UI) needs its port published and
+# needs to bind to all interfaces inside the container, so run it with:
+#   docker compose -f docker/docker-compose.yml --profile gpu run --rm --service-ports pipeline-gpu review-faces --host 0.0.0.0
+# then open http://localhost:7860 on the host.
 
 x-common: &common
   build:
     context: ..
   working_dir: /app
+  ports:
+    - "7860:7860"   # only published when a command is run with --service-ports (review-faces)
   volumes:
     - ../config.yaml:/app/config.yaml:ro
     - ../data:/app/data
     - ../models:/app/models
     - ${IMAGES_ROOT_HOST}:/data/images
     - ${CATALOG_COPY_DIR_HOST}:/data/lightroom
-    - insightface-cache:/root/.insightface
 
 services:
   pipeline-gpu:
@@ -47,6 +53,3 @@ services:
       context: ..
       dockerfile: docker/Dockerfile.cpu
     profiles: ["cpu"]
-
-volumes:
-  insightface-cache:

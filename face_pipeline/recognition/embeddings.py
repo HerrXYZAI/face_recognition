@@ -24,10 +24,17 @@ class FaceEmbedder:
     """Lazily loads the InsightFace model on first use, since model init is
     slow and not every CLI command needs it (e.g. `inspect-catalog`)."""
 
-    def __init__(self, model_name: str = "buffalo_l", ctx_id: int = 0, det_size=(640, 640)):
+    def __init__(
+        self,
+        model_name: str = "buffalo_l",
+        ctx_id: int = 0,
+        det_size=(640, 640),
+        model_root: str = "~/.insightface",
+    ):
         self._model_name = model_name
         self._ctx_id = ctx_id
         self._det_size = tuple(det_size)
+        self._model_root = model_root
         self._app = None
 
     def _ensure_loaded(self) -> None:
@@ -36,10 +43,10 @@ class FaceEmbedder:
         from insightface.app import FaceAnalysis
 
         logger.info(
-            "Loading InsightFace model '%s' (ctx_id=%d, det_size=%s)",
-            self._model_name, self._ctx_id, self._det_size,
+            "Loading InsightFace model '%s' (ctx_id=%d, det_size=%s, root=%s)",
+            self._model_name, self._ctx_id, self._det_size, self._model_root,
         )
-        self._app = FaceAnalysis(name=self._model_name)
+        self._app = FaceAnalysis(name=self._model_name, root=self._model_root)
         self._app.prepare(ctx_id=self._ctx_id, det_size=self._det_size)
 
     def detect(self, image_bgr: np.ndarray) -> list[DetectedFace]:

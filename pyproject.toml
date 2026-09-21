@@ -21,6 +21,12 @@ dependencies = [
 dev = [
     "pytest>=8.0",
 ]
+# Only needed for `face-pipeline review-faces` (the interactive verification
+# UI) -- kept separate since gradio is a heavy dependency (pulls in fastapi/
+# uvicorn) not everyone running the other steps needs.
+review = [
+    "gradio>=4.44",
+]
 
 [project.scripts]
 face-pipeline = "face_pipeline.cli:cli"

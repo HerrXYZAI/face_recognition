@@ -15,3 +15,5 @@ data/
 models/
 !data/.gitkeep
 !models/.gitkeep
+exiftool_files/
+test_images/

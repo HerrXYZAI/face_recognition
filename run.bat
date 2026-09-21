@@ -4,11 +4,13 @@ REM  run.bat - face_pipeline starten (Windows / Anaconda)
 REM
 REM  Richtet beim ersten Start automatisch eine Conda-Umgebung
 REM  "face_pipeline" ein (Python 3.11 + Abhaengigkeiten), oeffnet
-REM  danach ein Menue fuer die vier Schritte:
+REM  danach ein Menue fuer die fuenf Schritte:
 REM    1) Gesichter aus Lightroom exportieren
 REM    2) Klassifikator trainieren
 REM    3) Gesichtserkennung auf die Fotobibliothek anwenden
-REM    4) Ergebnisse als XMP nach Lightroom zurueckschreiben
+REM    4) Erkannte Gesichter im Browser pruefen (bevor irgendetwas
+REM       geschrieben wird)
+REM    5) Ergebnisse als XMP nach Lightroom zurueckschreiben
 REM
 REM  Kann direkt per Doppelklick gestartet werden - eine bereits
 REM  geoeffnete Anaconda Prompt ist NICHT erforderlich.
@@ -129,7 +131,7 @@ if defined JUST_CREATED (
     echo.
     echo [INFO] Installiere Python-Pakete, das kann ein paar Minuten dauern ...
     "%PYEXE%" -m pip install --upgrade pip >nul
-    "%PYEXE%" -m pip install -e .
+    "%PYEXE%" -m pip install -e ".[review]"
     if errorlevel 1 (
         echo [FEHLER] pip install fehlgeschlagen, siehe Ausgabe oben.
         pause
@@ -141,7 +143,7 @@ if defined JUST_CREATED (
     echo      ^(Menuepunkt "Abhaengigkeiten neu installieren" fuer ein Update.^)
 )
 
-REM --- 4. exiftool pruefen (nur fuer Schritt 4/write-xmp noetig) ----------
+REM --- 4. exiftool pruefen (nur fuer Schritt 5/write-xmp noetig) ----------
 where exiftool >nul 2>nul
 if not errorlevel 1 (
     echo [OK] exiftool im PATH gefunden.
@@ -153,7 +155,7 @@ if exist "%PROJECT_DIR%exiftool.exe" (
     goto :exiftool_done
 )
 echo.
-echo [WARNUNG] exiftool wurde nicht gefunden ^(nur fuer Schritt 4 noetig^).
+echo [WARNUNG] exiftool wurde nicht gefunden ^(nur fuer Schritt 5 noetig^).
 echo Bitte manuell herunterladen von https://exiftool.org
 echo   1. Die Windows-ZIP-Datei herunterladen und KOMPLETT entpacken
 echo      ^(nicht nur die .exe herausziehen!^)
@@ -176,6 +178,25 @@ if not exist "config.yaml" (
     notepad config.yaml
 )
 
+REM --- 5b. Warnen, falls config.yaml auf Docker-Container-Pfade zeigt -----
+REM (Pfad-Werte, keine Kommentare -- der Kopfkommentar in config.yaml nennt
+REM /data/... selbst als Docker-Beispiel und wuerde sonst faelschlich zaehlen.)
+findstr /V "^#" config.yaml | findstr /C:"/data/" >nul 2>nul
+if not errorlevel 1 (
+    echo.
+    echo ============================================================
+    echo  WARNUNG: config.yaml zeigt auf Docker-Container-Pfade
+    echo  ^(z.B. "/data/..."^) bei catalog_copy_path / images.root.
+    echo  Diese Pfade gibt es auf diesem Windows-Rechner nicht -
+    echo  Katalog-Schema, Export, Gesichtserkennung und XMP-Schreiben
+    echo  schlagen hier fehl ^(train-classifier/status funktionieren
+    echo  trotzdem, die nutzen diese Pfade nicht^).
+    echo  Bitte stattdessen die docker-compose-Befehle aus der
+    echo  README.md verwenden, oder config.yaml wieder auf die
+    echo  echten Windows-Pfade umstellen ^(Menuepunkt 9^).
+    echo ============================================================
+)
+
 echo.
 echo [OK] Setup abgeschlossen.
 echo.
@@ -191,30 +212,34 @@ echo  face_pipeline - Gesichtserkennung fuer Lightroom Classic
 echo ============================================================
 echo   1) Lightroom-Katalog-Schema anzeigen (Diagnose)
 echo   2) Schritt 1: Gesichter aus Lightroom exportieren
-echo   3) Export-Stichproben pruefen (Zuschnitte ansehen)
-echo   4) Schritt 2: Klassifikator trainieren
-echo   5) Schritt 3: Gesichtserkennung auf Fotobibliothek anwenden
-echo   6) Status anzeigen (erkannte Gesichter je Person)
-echo   7) Schritt 4: Ergebnisse als XMP nach Lightroom schreiben
-echo   8) config.yaml bearbeiten
-echo   9) Abhaengigkeiten neu installieren/aktualisieren
-echo  10) Beenden
+echo   3) Export-Uebersicht anzeigen (exportierte Gesichter je Person)
+echo   4) Export-Stichproben pruefen (Zuschnitte ansehen)
+echo   5) Schritt 2: Klassifikator trainieren
+echo   6) Schritt 3: Gesichtserkennung auf Fotobibliothek anwenden
+echo   7) Status anzeigen (erkannte Gesichter je Person)
+echo   8) Schritt 4: Erkannte Gesichter im Browser pruefen
+echo   9) Schritt 5: Ergebnisse als XMP nach Lightroom schreiben
+echo  10) config.yaml bearbeiten
+echo  11) Abhaengigkeiten neu installieren/aktualisieren
+echo  12) Beenden
 echo ============================================================
 set "CHOICE="
-set /p CHOICE="Auswahl (1-10, Enter = 2): "
+set /p CHOICE="Auswahl (1-12, Enter = 2): "
 if "%CHOICE%"=="" set "CHOICE=2"
 
 if "%CHOICE%"=="1" goto :do_inspect
 if "%CHOICE%"=="2" goto :do_export
-if "%CHOICE%"=="3" goto :do_verify
-if "%CHOICE%"=="4" goto :do_train
-if "%CHOICE%"=="5" goto :do_infer
-if "%CHOICE%"=="6" goto :do_status
-if "%CHOICE%"=="7" goto :do_xmp
-if "%CHOICE%"=="8" goto :do_editconfig
-if "%CHOICE%"=="9" goto :do_reinstall
-if "%CHOICE%"=="10" goto :end_ok
-echo Ungueltige Auswahl, bitte 1-10 eingeben.
+if "%CHOICE%"=="3" goto :do_export_status
+if "%CHOICE%"=="4" goto :do_verify
+if "%CHOICE%"=="5" goto :do_train
+if "%CHOICE%"=="6" goto :do_infer
+if "%CHOICE%"=="7" goto :do_status
+if "%CHOICE%"=="8" goto :do_review
+if "%CHOICE%"=="9" goto :do_xmp
+if "%CHOICE%"=="10" goto :do_editconfig
+if "%CHOICE%"=="11" goto :do_reinstall
+if "%CHOICE%"=="12" goto :end_ok
+echo Ungueltige Auswahl, bitte 1-12 eingeben.
 echo.
 goto :menu
 
@@ -228,6 +253,13 @@ goto :done
 echo.
 echo --- Schritt 1: Gesichter aus Lightroom exportieren ---
 "%PYEXE%" -m face_pipeline.cli export-faces
+"%PYEXE%" -m face_pipeline.cli export-status
+goto :done
+
+:do_export_status
+echo.
+echo --- Export-Uebersicht (exportierte Gesichter je Person) ---
+"%PYEXE%" -m face_pipeline.cli export-status
 goto :done
 
 :do_verify
@@ -263,9 +295,19 @@ echo.
 "%PYEXE%" -m face_pipeline.cli status
 goto :done
 
+:do_review
+echo.
+echo --- Schritt 4: Erkannte Gesichter im Browser pruefen ---
+echo Oeffnet gleich http://127.0.0.1:7860 im Hintergrund -- Browser manuell
+echo oeffnen und die vorgeschlagenen Namen bestaetigen/korrigieren/ablehnen.
+echo Zum Beenden hier im Fenster Strg+C druecken.
+echo.
+"%PYEXE%" -m face_pipeline.cli review-faces
+goto :done
+
 :do_xmp
 echo.
-echo --- Schritt 4: Ergebnisse als XMP nach Lightroom schreiben ---
+echo --- Schritt 5: Ergebnisse als XMP nach Lightroom schreiben ---
 where exiftool >nul 2>nul
 if errorlevel 1 (
     echo exiftool ist nicht verfuegbar -- siehe Hinweis beim Setup oben.
@@ -294,7 +336,7 @@ goto :done
 echo.
 echo --- Abhaengigkeiten neu installieren/aktualisieren ---
 "%PYEXE%" -m pip install --upgrade pip
-"%PYEXE%" -m pip install -e .
+"%PYEXE%" -m pip install -e ".[review]"
 call :install_onnxruntime
 goto :done
 

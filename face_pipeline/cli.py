@@ -2,10 +2,12 @@
 
     face-pipeline inspect-catalog        # dump Lightroom catalog schema (debug)
     face-pipeline export-faces           # step 1
+    face-pipeline export-status          # summary of step 1's labeled_faces.csv
     face-pipeline verify-crops           # debug: sanity-check bbox alignment
     face-pipeline train-classifier       # step 2
     face-pipeline run-inference          # step 3
-    face-pipeline write-xmp              # step 4
+    face-pipeline review-faces           # step 4: verify detections in a web UI
+    face-pipeline write-xmp              # step 5
     face-pipeline status                 # summary of faces.db
 """
 from __future__ import annotations
@@ -53,6 +55,30 @@ def export_faces_cmd(ctx: click.Context):
     click.echo(f"Exported {count} labeled faces to {cfg.labeled_faces_csv}")
 
 
+@cli.command("export-status")
+@click.pass_context
+def export_status_cmd(ctx: click.Context):
+    """Summary of the CSV exported in step 1: how many Lightroom-tagged faces
+    were exported, total and per person. This counts the labeled export, not
+    detections from run-inference (see `status` for that)."""
+    import csv as csv_module
+    from collections import Counter
+
+    cfg = Config.load(ctx.obj["config_path"])
+    if not cfg.labeled_faces_csv.exists():
+        raise click.ClickException(
+            f"{cfg.labeled_faces_csv} not found -- run `face-pipeline export-faces` first."
+        )
+
+    with cfg.labeled_faces_csv.open(newline="", encoding="utf-8") as f:
+        rows = list(csv_module.DictReader(f))
+
+    per_person = Counter(row["person_name"] for row in rows)
+    click.echo(f"Labeled faces exported: {len(rows)}")
+    for person, n in per_person.most_common():
+        click.echo(f"  {person}: {n}")
+
+
 @cli.command("verify-crops")
 @click.option("-n", "--count", default=10, show_default=True, help="Number of sample crops to save.")
 @click.option("-o", "--out-dir", default="data/verify_crops", show_default=True)
@@ -91,7 +117,13 @@ def verify_crops_cmd(ctx: click.Context, count: int, out_dir: str):
         if crop.size == 0:
             continue
         out_path = out / f"{saved:03d}_{row['person_name']}.jpg"
-        cv2.imwrite(str(out_path), crop)
+        # cv2.imwrite mangles non-ASCII paths on Windows (it goes through a
+        # narrow C file API, so UTF-8 bytes get reinterpreted with the ANSI
+        # codepage). Encode in memory and write the bytes ourselves instead.
+        ok, buf = cv2.imencode(".jpg", crop)
+        if not ok:
+            continue
+        out_path.write_bytes(buf.tobytes())
         saved += 1
 
     click.echo(f"Saved {saved} sample crops to {out} -- open them and confirm each shows the named person's face.")
@@ -110,6 +142,7 @@ def train_classifier_cmd(ctx: click.Context):
         model_name=cfg.recognition.model_name,
         ctx_id=cfg.recognition.ctx_id,
         det_size=cfg.recognition.detector_size,
+        model_root=cfg.recognition.model_root,
     )
     examples = collect_training_examples(cfg.labeled_faces_csv, embedder)
     classifier = train(examples)
@@ -132,6 +165,7 @@ def run_inference_cmd(ctx: click.Context, limit: int | None):
         model_name=cfg.recognition.model_name,
         ctx_id=cfg.recognition.ctx_id,
         det_size=cfg.recognition.detector_size,
+        model_root=cfg.recognition.model_root,
     )
     classifier = load_classifier(cfg.classifier_path)
     stats = run(
@@ -141,20 +175,44 @@ def run_inference_cmd(ctx: click.Context, limit: int | None):
     click.echo(stats)
 
 
+@cli.command("review-faces")
+@click.option("--host", default="127.0.0.1", show_default=True, help="Interface to bind the review UI to.")
+@click.option("--port", default=7860, show_default=True, type=int)
+@click.option("--share", is_flag=True, help="Also create a public gradio.live link (e.g. to review from another device).")
+@click.pass_context
+def review_faces_cmd(ctx: click.Context, host: str, port: int, share: bool):
+    """Step 4: interactively verify detected faces (cropped photo + predicted
+    name) in a local web UI before write-xmp writes them into Lightroom.
+    Only faces you approve here get written."""
+    try:
+        from face_pipeline.review.ui import launch
+    except ImportError as exc:
+        raise click.ClickException(
+            "gradio is not installed. Install it with `pip install -e \".[review]\"` "
+            "(or `pip install gradio`) to use this command."
+        ) from exc
+
+    cfg = Config.load(ctx.obj["config_path"])
+    click.echo(f"Starting review UI at http://{host}:{port} -- open it in a browser. Ctrl+C to stop.")
+    launch(cfg, host=host, port=port, share=share)
+
+
 @cli.command("write-xmp")
 @click.option("--dry-run", is_flag=True, help="Print what would be written without touching any files.")
 @click.option("--no-backup", is_flag=True, help="Skip exiftool's automatic backup copy (embed-format files only).")
 @click.pass_context
 def write_xmp_cmd(ctx: click.Context, dry_run: bool, no_backup: bool):
-    """Step 4: write detected faces back out as MWG face regions (embedded
-    XMP or .xmp sidecar, matching Lightroom's own convention per format)."""
+    """Step 5: write approved faces back out as MWG face regions (embedded
+    XMP or .xmp sidecar, matching Lightroom's own convention per format).
+    Only faces approved via `review-faces` are written."""
     from face_pipeline.lightroom.xmp_writer import write_regions
     from face_pipeline.pipeline import db
 
     cfg = Config.load(ctx.obj["config_path"])
     written, failed = 0, 0
     with db.connect(cfg.faces_db) as conn:
-        for image_path, width, height, faces in db.iter_faces_for_xmp(conn, cfg.xmp_min_confidence):
+        pending = db.review_counts(conn)["pending"]
+        for image_path, width, height, faces in db.iter_faces_for_xmp(conn):
             try:
                 write_regions(
                     Path(image_path), width, height, faces,
@@ -166,6 +224,11 @@ def write_xmp_cmd(ctx: click.Context, dry_run: bool, no_backup: bool):
                 failed += 1
 
     click.echo(f"Wrote regions for {written} images ({failed} failed).")
+    if pending:
+        click.echo(
+            f"{pending} detected face(s) are still pending review and were skipped. "
+            "Run `face-pipeline review-faces` to approve/reject them, then re-run write-xmp."
+        )
     click.echo(
         "Next: in Lightroom, select the affected photos and run "
         "Metadata > Read Metadata from Files so the new face regions appear."
@@ -185,11 +248,18 @@ def status_cmd(ctx: click.Context):
         per_person = conn.execute(
             "SELECT person_name, COUNT(*) AS n FROM faces GROUP BY person_name ORDER BY n DESC"
         ).fetchall()
+        review = db.review_counts(conn)
 
     click.echo(f"Images processed: {n_images}")
     click.echo(f"Faces detected:   {n_faces}")
     for row in per_person:
         click.echo(f"  {row['person_name']}: {row['n']}")
+    click.echo(
+        f"Review status:    {review['pending']} pending, {review['approved']} approved, "
+        f"{review['rejected']} rejected"
+    )
+    if review["pending"]:
+        click.echo("  Run `face-pipeline review-faces` to review pending faces before write-xmp.")
 
 
 if __name__ == "__main__":
