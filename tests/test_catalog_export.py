@@ -57,7 +57,7 @@ def test_export_faces_reads_confirmed_only(tmp_path: Path):
     _build_fixture_catalog(catalog)
     out_csv = tmp_path / "labeled_faces.csv"
 
-    count = export_faces(catalog, out_csv)
+    count = export_faces(catalog, out_csv, Path("/photos/"))
     assert count == 1
 
     with out_csv.open(newline="", encoding="utf-8") as f:
@@ -72,6 +72,24 @@ def test_export_faces_reads_confirmed_only(tmp_path: Path):
     assert float(row["right"]) == 0.5
     assert float(row["bottom"]) == 0.4
     assert row["confirmed"] == "1"
+
+
+def test_export_faces_resolves_under_configured_images_root(tmp_path: Path):
+    """The catalog's own recorded root_path ('/photos/') only matches the
+    real filesystem when running on the same machine/mount layout Lightroom
+    saw at import time (e.g. bare-metal via run.bat). Under Docker the host
+    folder is bind-mounted elsewhere (e.g. /data/images), so export_faces
+    must rebuild paths under the *configured* images_root instead."""
+    catalog = tmp_path / "catalog.lrcat"
+    _build_fixture_catalog(catalog)
+    out_csv = tmp_path / "labeled_faces.csv"
+
+    export_faces(catalog, out_csv, Path("/data/images"))
+
+    with out_csv.open(newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+
+    assert Path(rows[0]["image_path"]) == Path("/data/images/2024/vacation/IMG_0001.jpg")
 
 
 def test_inspect_catalog_lists_columns(tmp_path: Path):

@@ -146,7 +146,7 @@ def inspect_catalog(catalog_path: Path) -> str:
         conn.close()
 
 
-def _iter_labeled_faces(conn: sqlite3.Connection) -> Iterator[LabeledFace]:
+def _iter_labeled_faces(conn: sqlite3.Connection, images_root: Path) -> Iterator[LabeledFace]:
     bbox_cols, to_ltrb = _resolve_bbox_columns(conn)
 
     query = f"""
@@ -175,10 +175,27 @@ def _iter_labeled_faces(conn: sqlite3.Connection) -> Iterator[LabeledFace]:
     # The 4 bbox columns are aliased positionally (c0..c3) in the order the
     # matched scheme declared them, so `to_ltrb` can stay scheme-agnostic here.
     keys = list(bbox_cols)
+    warned_roots: set[str] = set()
     for row in conn.execute(query):
         raw = {keys[i]: row[f"c{i}"] for i in range(4)}
         left, top, right, bottom = to_ltrb(raw)
-        path = str(Path(row["root_path"]) / row["folder_path"] / f"{row['base_name']}.{row['extension']}")
+        # Rebuild the path under the *configured* images_root rather than
+        # Lightroom's own recorded root_path: the two only coincide when
+        # this runs on the same machine/filesystem layout Lightroom saw at
+        # import time. Under Docker (or after moving the library), the
+        # catalog's absolute root_path won't exist, but the relative
+        # folder_path/filename structure underneath it still matches
+        # images_root -- see the "images.root" comment in config.example.yaml.
+        if row["root_path"] not in warned_roots:
+            warned_roots.add(row["root_path"])
+            if len(warned_roots) > 1:
+                logger.warning(
+                    "Catalog references multiple Lightroom root folders (now "
+                    "including %r); all faces are being resolved under the "
+                    "single configured images.root=%s, which will be wrong "
+                    "for files outside that folder.", row["root_path"], images_root,
+                )
+        path = str(Path(images_root) / row["folder_path"] / f"{row['base_name']}.{row['extension']}")
         yield LabeledFace(
             image_path=path,
             person_name=row["person_name"],
@@ -190,7 +207,7 @@ def _iter_labeled_faces(conn: sqlite3.Connection) -> Iterator[LabeledFace]:
         )
 
 
-def export_faces(catalog_path: Path, out_csv: Path) -> int:
+def export_faces(catalog_path: Path, out_csv: Path, images_root: Path) -> int:
     """Exports labeled faces to `out_csv`. Returns the number of rows written."""
     conn = _open_readonly(catalog_path)
     try:
@@ -202,7 +219,7 @@ def export_faces(catalog_path: Path, out_csv: Path) -> int:
             writer.writerow(
                 ["image_path", "person_name", "left", "top", "right", "bottom", "confirmed"]
             )
-            for face in _iter_labeled_faces(conn):
+            for face in _iter_labeled_faces(conn, images_root):
                 writer.writerow(
                     [
                         face.image_path,

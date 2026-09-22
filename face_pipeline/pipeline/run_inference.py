@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 IMAGE_EXTENSIONS = {
     ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".dng",
-    ".cr2", ".cr3", ".nef", ".arw", ".raf", ".rw2", ".orf", ".pef", ".heic",
+    ".cr2", ".cr3", ".nef", ".arw", ".raf", ".orf", ".pef", ".heic",
 }
 MODEL_VERSION = "buffalo_l+svm-v1"
 

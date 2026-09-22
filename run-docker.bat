@@ -32,6 +32,21 @@ echo  face_pipeline - Docker-Setup
 echo ============================================================
 echo.
 
+REM --- 0. Conda-Umgebung "face_pipeline" aktivieren (falls vorhanden) ------
+REM  Wird fuer den Docker-Betrieb selbst nicht benoetigt, aber so ist in
+REM  diesem Fenster dieselbe Umgebung aktiv wie bei run.bat.
+where conda >nul 2>nul
+if not errorlevel 1 (
+    call conda activate face_pipeline >nul 2>nul
+    if not errorlevel 1 (
+        echo [OK] Conda-Umgebung "face_pipeline" aktiviert.
+    ) else (
+        echo [INFO] Conda-Umgebung "face_pipeline" nicht gefunden -- ueberspringe Aktivierung.
+    )
+) else (
+    echo [INFO] Conda nicht gefunden -- ueberspringe Aktivierung ^(fuer Docker nicht erforderlich^).
+)
+
 REM --- 1. Docker pruefen ---------------------------------------------------
 where docker >nul 2>nul
 if errorlevel 1 (

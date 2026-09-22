@@ -51,7 +51,7 @@ def export_faces_cmd(ctx: click.Context):
     from face_pipeline.lightroom.catalog_export import export_faces
 
     cfg = Config.load(ctx.obj["config_path"])
-    count = export_faces(cfg.catalog_copy_path, cfg.labeled_faces_csv)
+    count = export_faces(cfg.catalog_copy_path, cfg.labeled_faces_csv, cfg.images_root)
     click.echo(f"Exported {count} labeled faces to {cfg.labeled_faces_csv}")
 
 

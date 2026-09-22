@@ -91,11 +91,13 @@ def _render(queue: list[dict], idx: int):
     return None, "Queue empty -- nothing left to review with the current filters.", idx, None
 
 
-def _build_gallery(queue: list[dict]) -> list[tuple[np.ndarray, str]]:
+def _build_gallery(queue: list[dict]) -> tuple[list[tuple[np.ndarray, str]], list[dict]]:
     """Renders every face in the (already-filtered) queue as a padded crop
     for the grid view. Skips faces whose source image fails to load, same as
-    the one-by-one reviewer."""
+    the one-by-one reviewer. Returns (items, faces) with matching indices, so
+    a gallery click index can be mapped straight back to the face it shows."""
     items = []
+    faces = []
     for face in queue:
         try:
             image_bgr = _load_cached_bgr(face["path"])
@@ -105,7 +107,18 @@ def _build_gallery(queue: list[dict]) -> list[tuple[np.ndarray, str]]:
             continue
         caption = f"{face['person_name']} ({face['confidence']:.2f}) -- {Path(face['path']).name}"
         items.append((crop, caption))
-    return items
+        faces.append(face)
+    return items, faces
+
+
+def _mark_selected(items: list[tuple[np.ndarray, str]], selected: set[int]) -> list[tuple[np.ndarray, str]]:
+    """Re-renders gallery captions with a checkmark on selected items --
+    Gradio's Gallery has no built-in multi-select, so selection is tracked
+    ourselves and shown this way instead."""
+    return [
+        (img, f"✅ {caption}" if i in selected else caption)
+        for i, (img, caption) in enumerate(items)
+    ]
 
 
 def _name_dropdown_update(face: Optional[dict], names: list[str]):
@@ -135,6 +148,7 @@ def build_app(cfg: Config) -> gr.Blocks:
             _name_dropdown_update(face, names),
             gr.update(choices=person_choices, value=person_value),
             [],  # clear any stale grid view -- it no longer matches the new queue until rebuilt
+            [], [], set(), "**0** selected",  # ditto for grid selection state
         )
 
     def act(
@@ -196,7 +210,56 @@ def build_app(cfg: Config) -> gr.Blocks:
         )
 
     def build_grid(queue: list[dict]):
-        return _build_gallery(queue)
+        items, faces = _build_gallery(queue)
+        return items, items, faces, set(), "**0** selected"
+
+    def toggle_grid_selection(evt: gr.SelectData, items: list[tuple[np.ndarray, str]], selected: set[int]):
+        selected = set(selected)
+        selected.symmetric_difference_update({evt.index})
+        return _mark_selected(items, selected), selected, f"**{len(selected)}** selected"
+
+    def select_all_grid(items: list[tuple[np.ndarray, str]]):
+        selected = set(range(len(items)))
+        return _mark_selected(items, selected), selected, f"**{len(selected)}** selected"
+
+    def clear_grid_selection(items: list[tuple[np.ndarray, str]]):
+        return _mark_selected(items, set()), set(), "**0** selected"
+
+    def approve_selected(
+        faces: list[dict], selected: set[int],
+        status_filter: str, person_filter: str, min_conf: float, include_unknown: bool,
+    ):
+        if not selected:
+            with db.connect(cfg.faces_db) as conn:
+                counts_md = _counts_markdown(conn)
+            return [gr.update()] * 6 + [counts_md] + [gr.update()] * 6 + [
+                "**Nothing selected** -- click thumbnails in the grid to select them, then approve."
+            ]
+
+        approved, skipped = 0, 0
+        with db.connect(cfg.faces_db) as conn:
+            for idx in sorted(selected):
+                face = faces[idx]
+                if face["person_name"] == UNKNOWN:
+                    skipped += 1
+                    continue
+                db.set_review_status(conn, face["id"], "approved", person_name=face["person_name"], reviewed_at=_now())
+                approved += 1
+
+        reloaded = load_queue(status_filter, person_filter, min_conf, include_unknown)
+        (queue, idx0, names, last_action, image, info, counts_md, name_dd, person_dd, *_stale_grid) = reloaded
+        gallery_items, grid_items, grid_faces, grid_selected, _grid_status = build_grid(queue)
+
+        msg = f"**Approved {approved} face(s).**"
+        if skipped:
+            msg += (
+                f" Skipped {skipped} still labeled '{UNKNOWN}' -- assign a name via "
+                "the one-by-one reviewer first."
+            )
+        return (
+            queue, idx0, names, last_action, image, info, counts_md, name_dd, person_dd,
+            gallery_items, grid_items, grid_faces, grid_selected, msg,
+        )
 
     with gr.Blocks(title="face_pipeline -- review faces") as demo:
         gr.Markdown(
@@ -230,21 +293,36 @@ def build_app(cfg: Config) -> gr.Blocks:
             undo_btn = gr.Button("↩️ Undo last")
 
         with gr.Accordion("Grid view -- all filtered faces at once", open=False) as grid_accordion:
+            gr.Markdown(
+                "Click thumbnails to select/deselect them (marked ✅), then **Approve "
+                "selected** to approve all of them at once, each under its current predicted "
+                "name. Faces still labeled 'unknown' are skipped -- rename those individually "
+                "in the one-by-one reviewer above first."
+            )
             grid_btn = gr.Button("Build / refresh grid from current filters")
             gallery = gr.Gallery(
-                label="Click a thumbnail to enlarge", columns=8, height="auto",
+                label="Click a thumbnail to select/deselect", columns=8, height="auto",
                 object_fit="contain", allow_preview=True,
             )
+            with gr.Row():
+                select_all_btn = gr.Button("Select all")
+                clear_selection_btn = gr.Button("Clear selection")
+                approve_selected_btn = gr.Button("✅ Approve selected", variant="primary")
+            grid_status_md = gr.Markdown("**0** selected")
 
         queue_state = gr.State([])
         idx_state = gr.State(0)
         names_state = gr.State([])
         last_action_state = gr.State(None)
+        grid_items_state = gr.State([])
+        grid_faces_state = gr.State([])
+        grid_selected_state = gr.State(set())
 
         load_inputs = [status_filter, person_filter, min_conf, include_unknown]
         load_outputs = [
             queue_state, idx_state, names_state, last_action_state,
             image, info_md, counts_md, name_dropdown, person_filter, gallery,
+            grid_items_state, grid_faces_state, grid_selected_state, grid_status_md,
         ]
         act_inputs = [queue_state, idx_state, names_state, name_dropdown, last_action_state]
         act_outputs = [queue_state, idx_state, image, info_md, counts_md, name_dropdown, last_action_state]
@@ -256,7 +334,26 @@ def build_app(cfg: Config) -> gr.Blocks:
         skip_btn.click(partial(act, action="skip"), inputs=act_inputs, outputs=act_outputs)
         undo_inputs = [queue_state, idx_state, names_state, last_action_state]
         undo_btn.click(undo_last, inputs=undo_inputs, outputs=act_outputs)
-        grid_btn.click(build_grid, inputs=[queue_state], outputs=[gallery])
+
+        grid_outputs = [gallery, grid_items_state, grid_faces_state, grid_selected_state, grid_status_md]
+        grid_btn.click(build_grid, inputs=[queue_state], outputs=grid_outputs)
+        gallery.select(
+            toggle_grid_selection, inputs=[grid_items_state, grid_selected_state],
+            outputs=[gallery, grid_selected_state, grid_status_md],
+        )
+        select_all_btn.click(
+            select_all_grid, inputs=[grid_items_state],
+            outputs=[gallery, grid_selected_state, grid_status_md],
+        )
+        clear_selection_btn.click(
+            clear_grid_selection, inputs=[grid_items_state],
+            outputs=[gallery, grid_selected_state, grid_status_md],
+        )
+        approve_selected_btn.click(
+            approve_selected,
+            inputs=[grid_faces_state, grid_selected_state, status_filter, person_filter, min_conf, include_unknown],
+            outputs=load_outputs[:9] + grid_outputs,
+        )
 
     return demo
 

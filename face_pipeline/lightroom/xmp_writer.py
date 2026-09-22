@@ -20,15 +20,25 @@ after running this step, so the new regions and names appear.
 """
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Optional
+
+from face_pipeline.imaging import iou
 
 logger = logging.getLogger(__name__)
 
 EMBED_EXTENSIONS = {".dng", ".jpg", ".jpeg", ".tif", ".tiff", ".psd", ".heic"}
 SIDECAR_EXTENSIONS = {".cr2", ".cr3", ".nef", ".arw", ".raf", ".rw2", ".orf", ".pef"}
+
+# Two regions are treated as "the same physical face" (update in place) when
+# their boxes overlap by at least this much; below it, both are kept side by
+# side. Matches the threshold train_classifier.py uses for the same kind of
+# bounding-box matching.
+REGION_MATCH_IOU = 0.3
 
 # ExifTool's struct-value syntax escapes special characters with a leading
 # "|", not a backslash (see https://exiftool.org/struct.html) -- e.g. a
@@ -65,25 +75,96 @@ def target_path_for(image_path: Path) -> tuple[Path, bool]:
     )
 
 
-def _build_region_info(
-    width: int, height: int, faces: list[tuple[str, float, float, float, float]]
+def _region_struct_item(
+    name: str, left: float, top: float, right: float, bottom: float, region_type: str = "Face"
 ) -> str:
-    """faces: list of (person_name, left, top, right, bottom), all fractional
-    0..1. MWG regions use a CENTER x/y + width/height, normalized 0..1 --
-    distinct from Lightroom's own top/left/bottom/right internal storage."""
-    region_items = []
-    for name, left, top, right, bottom in faces:
-        cx, cy = (left + right) / 2, (top + bottom) / 2
-        w, h = right - left, bottom - top
-        region_items.append(
-            "{Area={X=%s,Y=%s,W=%s,H=%s,Unit=normalized},Name=%s,Type=Face}"
-            % (cx, cy, w, h, _escape(name))
-        )
+    """left/top/right/bottom: fractional 0..1. MWG regions use a CENTER x/y +
+    width/height, normalized 0..1 -- distinct from Lightroom's own
+    top/left/bottom/right internal storage."""
+    cx, cy = (left + right) / 2, (top + bottom) / 2
+    w, h = right - left, bottom - top
+    return "{Area={X=%s,Y=%s,W=%s,H=%s,Unit=normalized},Name=%s,Type=%s}" % (
+        cx, cy, w, h, _escape(name), _escape(region_type),
+    )
+
+
+def _build_region_info(width: int, height: int, region_items: list[str]) -> str:
     region_list = "[" + ",".join(region_items) + "]"
     return (
         "{AppliedToDimensions={W=%d,H=%d,Unit=pixel},RegionList=%s}"
         % (width, height, region_list)
     )
+
+
+def _existing_region_list(exiftool: str, target: Path) -> list[dict]:
+    """Reads the MWG face regions already present at `target`, if any, so a
+    re-run can update/attach to them instead of clobbering the whole list.
+    Returns [] if the file/sidecar doesn't exist yet or has no regions."""
+    if not target.exists():
+        return []
+    result = subprocess.run(
+        [exiftool, "-j", "-struct", "-XMP-mwg-rs:RegionInfo", str(target)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return []
+    try:
+        parsed = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        logger.warning(
+            "Could not read existing regions from %s (unparseable exiftool output) -- "
+            "writing without merging.", target,
+        )
+        return []
+    if not parsed:
+        return []
+    region_info = parsed[0].get("RegionInfo")
+    if not region_info:
+        return []
+    region_list = region_info.get("RegionList") or []
+    if isinstance(region_list, dict):
+        region_list = [region_list]  # exiftool collapses a single-item list to a bare dict
+    return region_list
+
+
+def _region_bbox(region: dict) -> Optional[tuple[float, float, float, float]]:
+    area = region.get("Area")
+    if not isinstance(area, dict) or str(area.get("Unit", "normalized")).lower() != "normalized":
+        return None
+    try:
+        cx, cy, w, h = float(area["X"]), float(area["Y"]), float(area["W"]), float(area["H"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
+
+
+def _merge_region_items(
+    existing: list[dict], new_faces: list[tuple[str, float, float, float, float]], target: Path,
+) -> list[str]:
+    """Existing regions are kept as-is unless a new region's box overlaps
+    them closely enough to be the same physical face, in which case the new
+    one replaces it. This preserves anything else already in the file --
+    regions from an earlier write-xmp run, or from another tool entirely --
+    instead of overwriting the whole region list."""
+    new_boxes = [(left, top, right, bottom) for _name, left, top, right, bottom in new_faces]
+    kept_items = []
+    unparseable = 0
+    for region in existing:
+        bbox = _region_bbox(region)
+        name = region.get("Name")
+        if bbox is None or not name:
+            unparseable += 1
+            continue
+        if any(iou(bbox, new_box) >= REGION_MATCH_IOU for new_box in new_boxes):
+            continue  # superseded by one of the new regions below
+        kept_items.append(_region_struct_item(str(name), *bbox, region_type=str(region.get("Type") or "Face")))
+    if unparseable:
+        logger.warning(
+            "%d existing region(s) in %s were in an unexpected format and could not "
+            "be preserved -- they were dropped.", unparseable, target,
+        )
+    new_items = [_region_struct_item(name, left, top, right, bottom) for name, left, top, right, bottom in new_faces]
+    return kept_items + new_items
 
 
 def write_regions(
@@ -94,17 +175,23 @@ def write_regions(
     keep_backup: bool = True,
     dry_run: bool = False,
 ) -> Path:
-    """Writes/replaces the MWG face-region list for one image. Returns the
-    path actually written (the image itself, or its .xmp sidecar).
+    """Writes the MWG face-region list for one image, merged with whatever
+    regions are already there. Returns the path actually written (the image
+    itself, or its .xmp sidecar).
 
     For embed-capable formats this modifies the original file; exiftool
     keeps a `<file>_original` backup copy by default (`keep_backup=True`).
     For sidecars, exiftool creates the .xmp file from scratch if it doesn't
-    already exist, or merges into it (preserving other tags) if it does.
+    already exist. Either way, existing regions are read first: one that
+    spatially overlaps a face passed in here is updated in place, everything
+    else already there (from an earlier run, or another tool) is kept as-is
+    -- the target is never blindly overwritten. See `_merge_region_items`.
     """
     exiftool = require_exiftool()
     target, _is_sidecar = target_path_for(image_path)
-    region_info = _build_region_info(width, height, faces)
+    existing = _existing_region_list(exiftool, target)
+    region_items = _merge_region_items(existing, faces, target)
+    region_info = _build_region_info(width, height, region_items)
 
     args = [exiftool, "-struct"]
     if not keep_backup:
@@ -118,5 +205,8 @@ def write_regions(
     result = subprocess.run(args, capture_output=True, text=True)
     if result.returncode != 0:
         raise RuntimeError(f"exiftool failed for {target}: {result.stderr.strip()}")
-    logger.debug("Wrote %d region(s) to %s", len(faces), target)
+    logger.debug(
+        "Wrote %d region(s) to %s (%d new/updated, %d preserved from before)",
+        len(region_items), target, len(faces), len(region_items) - len(faces),
+    )
     return target
