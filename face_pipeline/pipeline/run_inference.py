@@ -1,7 +1,9 @@
 """Step 3: batch face detection + classification over the full image library,
 storing every detected face (bounding box, embedding, predicted person) into
 faces.db. Resumable -- images already processed at their current mtime are
-skipped, so a re-run after adding new photos only processes what's new.
+skipped, so a re-run after adding new photos, or after being stopped
+partway through, only processes what's left. Pass restart=True to ignore
+that and reprocess the whole library from scratch instead.
 """
 from __future__ import annotations
 
@@ -40,7 +42,16 @@ def run(
     classifier: PersonClassifier,
     min_confidence: float,
     limit: Optional[int] = None,
+    restart: bool = False,
 ) -> dict:
+    """restart=False (default) skips any image already processed at its
+    current mtime -- the mechanism that makes this resumable: each image is
+    committed to faces.db (image row + all its faces) as soon as it's done,
+    so stopping the run anytime loses at most the one image in flight, and
+    re-running just picks up with whatever isn't committed yet. restart=True
+    ignores that check and reprocesses every image regardless of mtime,
+    which -- like any mtime change today -- replaces its existing faces and
+    resets their review decisions back to pending (see db.upsert_image)."""
     stats = {"images_processed": 0, "images_skipped": 0, "faces_found": 0, "errors": 0}
     paths = list(iter_images(images_root))
     if limit:
@@ -50,10 +61,11 @@ def run(
     with db.connect(faces_db_path) as conn:
         for i, path in enumerate(tqdm(paths, desc="Processing images")):
             mtime = path.stat().st_mtime
-            existing_mtime = db.get_processed_mtime(conn, str(path))
-            if existing_mtime is not None and existing_mtime == mtime:
-                stats["images_skipped"] += 1
-                continue
+            if not restart:
+                existing_mtime = db.get_processed_mtime(conn, str(path))
+                if existing_mtime is not None and existing_mtime == mtime:
+                    stats["images_skipped"] += 1
+                    continue
 
             try:
                 image_bgr = load_image_bgr(path)
@@ -84,8 +96,10 @@ def run(
             stats["images_processed"] += 1
             stats["faces_found"] += len(detections)
 
+            # Committed per image (not batched) so an interrupted run can
+            # resume from exactly here instead of redoing a whole batch.
+            conn.commit()
             if (i + 1) % 500 == 0:
-                conn.commit()
                 logger.info("Progress: %s", stats)
 
     logger.info("Done: %s", stats)

@@ -147,6 +147,7 @@ def build_app(cfg: Config) -> gr.Blocks:
             image, info, counts_md,
             _name_dropdown_update(face, names),
             gr.update(choices=person_choices, value=person_value),
+            gr.update(choices=names),  # grid's "approve as this name" choices
             [],  # clear any stale grid view -- it no longer matches the new queue until rebuilt
             [], [], set(), "**0** selected",  # ditto for grid selection state
         )
@@ -232,7 +233,7 @@ def build_app(cfg: Config) -> gr.Blocks:
         if not selected:
             with db.connect(cfg.faces_db) as conn:
                 counts_md = _counts_markdown(conn)
-            return [gr.update()] * 6 + [counts_md] + [gr.update()] * 6 + [
+            return [gr.update()] * 6 + [counts_md] + [gr.update()] * 7 + [
                 "**Nothing selected** -- click thumbnails in the grid to select them, then approve."
             ]
 
@@ -247,7 +248,7 @@ def build_app(cfg: Config) -> gr.Blocks:
                 approved += 1
 
         reloaded = load_queue(status_filter, person_filter, min_conf, include_unknown)
-        (queue, idx0, names, last_action, image, info, counts_md, name_dd, person_dd, *_stale_grid) = reloaded
+        (queue, idx0, names, last_action, image, info, counts_md, name_dd, person_dd, grid_name_dd, *_stale_grid) = reloaded
         gallery_items, grid_items, grid_faces, grid_selected, _grid_status = build_grid(queue)
 
         msg = f"**Approved {approved} face(s).**"
@@ -257,7 +258,40 @@ def build_app(cfg: Config) -> gr.Blocks:
                 "the one-by-one reviewer first."
             )
         return (
-            queue, idx0, names, last_action, image, info, counts_md, name_dd, person_dd,
+            queue, idx0, names, last_action, image, info, counts_md, name_dd, person_dd, grid_name_dd,
+            gallery_items, grid_items, grid_faces, grid_selected, msg,
+        )
+
+    def approve_selected_as(
+        faces: list[dict], selected: set[int], chosen_name: Optional[str],
+        status_filter: str, person_filter: str, min_conf: float, include_unknown: bool,
+    ):
+        if not selected:
+            with db.connect(cfg.faces_db) as conn:
+                counts_md = _counts_markdown(conn)
+            return [gr.update()] * 6 + [counts_md] + [gr.update()] * 7 + [
+                "**Nothing selected** -- click thumbnails in the grid to select them, then approve."
+            ]
+        if not chosen_name or chosen_name.strip().lower() == UNKNOWN:
+            with db.connect(cfg.faces_db) as conn:
+                counts_md = _counts_markdown(conn)
+            return [gr.update()] * 6 + [counts_md] + [gr.update()] * 7 + [
+                "**Pick a real name before approving** (can't approve as 'unknown')."
+            ]
+
+        with db.connect(cfg.faces_db) as conn:
+            for idx in sorted(selected):
+                face = faces[idx]
+                db.set_review_status(conn, face["id"], "approved", person_name=chosen_name, reviewed_at=_now())
+        approved = len(selected)
+
+        reloaded = load_queue(status_filter, person_filter, min_conf, include_unknown)
+        (queue, idx0, names, last_action, image, info, counts_md, name_dd, person_dd, grid_name_dd, *_stale_grid) = reloaded
+        gallery_items, grid_items, grid_faces, grid_selected, _grid_status = build_grid(queue)
+
+        msg = f"**Approved {approved} face(s) as '{chosen_name}'.**"
+        return (
+            queue, idx0, names, last_action, image, info, counts_md, name_dd, person_dd, grid_name_dd,
             gallery_items, grid_items, grid_faces, grid_selected, msg,
         )
 
@@ -294,20 +328,28 @@ def build_app(cfg: Config) -> gr.Blocks:
 
         with gr.Accordion("Grid view -- all filtered faces at once", open=False) as grid_accordion:
             gr.Markdown(
-                "Click thumbnails to select/deselect them (marked ✅), then **Approve "
-                "selected** to approve all of them at once, each under its current predicted "
-                "name. Faces still labeled 'unknown' are skipped -- rename those individually "
-                "in the one-by-one reviewer above first."
+                "Click thumbnails to select/deselect them (marked ✅). **Approve selected** "
+                "approves each one under its own current predicted name (faces still labeled "
+                "'unknown' are skipped -- rename those individually in the one-by-one reviewer "
+                "above first). Or pick a name below and **Approve selected as chosen name** to "
+                "assign that one name to every selected face at once, regardless of its "
+                "prediction -- handy for batch-correcting a whole group of misclassified faces."
             )
             grid_btn = gr.Button("Build / refresh grid from current filters")
             gallery = gr.Gallery(
                 label="Click a thumbnail to select/deselect", columns=8, height="auto",
-                object_fit="contain", allow_preview=True,
+                object_fit="contain", allow_preview=False,
             )
             with gr.Row():
                 select_all_btn = gr.Button("Select all")
                 clear_selection_btn = gr.Button("Clear selection")
                 approve_selected_btn = gr.Button("✅ Approve selected", variant="primary")
+            with gr.Row():
+                grid_name_dropdown = gr.Dropdown(
+                    choices=[], label="...or approve selected as this specific name",
+                    allow_custom_value=True,
+                )
+                approve_selected_as_btn = gr.Button("✅ Approve selected as chosen name", variant="primary")
             grid_status_md = gr.Markdown("**0** selected")
 
         queue_state = gr.State([])
@@ -321,7 +363,7 @@ def build_app(cfg: Config) -> gr.Blocks:
         load_inputs = [status_filter, person_filter, min_conf, include_unknown]
         load_outputs = [
             queue_state, idx_state, names_state, last_action_state,
-            image, info_md, counts_md, name_dropdown, person_filter, gallery,
+            image, info_md, counts_md, name_dropdown, person_filter, grid_name_dropdown, gallery,
             grid_items_state, grid_faces_state, grid_selected_state, grid_status_md,
         ]
         act_inputs = [queue_state, idx_state, names_state, name_dropdown, last_action_state]
@@ -352,7 +394,15 @@ def build_app(cfg: Config) -> gr.Blocks:
         approve_selected_btn.click(
             approve_selected,
             inputs=[grid_faces_state, grid_selected_state, status_filter, person_filter, min_conf, include_unknown],
-            outputs=load_outputs[:9] + grid_outputs,
+            outputs=load_outputs[:10] + grid_outputs,
+        )
+        approve_selected_as_btn.click(
+            approve_selected_as,
+            inputs=[
+                grid_faces_state, grid_selected_state, grid_name_dropdown,
+                status_filter, person_filter, min_conf, include_unknown,
+            ],
+            outputs=load_outputs[:10] + grid_outputs,
         )
 
     return demo

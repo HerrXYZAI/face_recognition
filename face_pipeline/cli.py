@@ -152,8 +152,16 @@ def train_classifier_cmd(ctx: click.Context):
 
 @cli.command("run-inference")
 @click.option("--limit", type=int, default=None, help="Only process the first N images (for a quick test run).")
+@click.option(
+    "--restart", is_flag=True,
+    help="Reprocess every image from scratch, ignoring the usual skip-if-unchanged check. "
+         "Without this flag, a run that was previously stopped partway through simply "
+         "continues where it left off. Reprocessing an image replaces its faces and resets "
+         "their review decisions back to pending, same as today when a photo's mtime changes "
+         "-- with --restart this applies to the whole library, not just changed files.",
+)
 @click.pass_context
-def run_inference_cmd(ctx: click.Context, limit: int | None):
+def run_inference_cmd(ctx: click.Context, limit: int | None, restart: bool):
     """Step 3: detect + classify faces across the full image library, storing
     results in faces.db."""
     from face_pipeline.pipeline.run_inference import run
@@ -170,7 +178,7 @@ def run_inference_cmd(ctx: click.Context, limit: int | None):
     classifier = load_classifier(cfg.classifier_path)
     stats = run(
         cfg.images_root, cfg.faces_db, embedder, classifier,
-        min_confidence=cfg.recognition.min_confidence, limit=limit,
+        min_confidence=cfg.recognition.min_confidence, limit=limit, restart=restart,
     )
     click.echo(stats)
 
@@ -200,30 +208,33 @@ def review_faces_cmd(ctx: click.Context, host: str, port: int, share: bool):
 @cli.command("write-xmp")
 @click.option("--dry-run", is_flag=True, help="Print what would be written without touching any files.")
 @click.option("--no-backup", is_flag=True, help="Skip exiftool's automatic backup copy (embed-format files only).")
+@click.option(
+    "--resume", is_flag=True,
+    help="Skip images already exported by a previous, interrupted write-xmp run instead of "
+         "starting over from the first approved image. Has no effect after a run completes "
+         "in full -- completion always clears the resume markers, so the next run (resumed "
+         "or not) processes everything again.",
+)
 @click.pass_context
-def write_xmp_cmd(ctx: click.Context, dry_run: bool, no_backup: bool):
+def write_xmp_cmd(ctx: click.Context, dry_run: bool, no_backup: bool, resume: bool):
     """Step 5: write approved faces back out as MWG face regions (embedded
     XMP or .xmp sidecar, matching Lightroom's own convention per format).
     Only faces approved via `review-faces` are written."""
-    from face_pipeline.lightroom.xmp_writer import write_regions
+    from face_pipeline.lightroom.xmp_writer import write_approved_regions
     from face_pipeline.pipeline import db
 
     cfg = Config.load(ctx.obj["config_path"])
-    written, failed = 0, 0
     with db.connect(cfg.faces_db) as conn:
         pending = db.review_counts(conn)["pending"]
-        for image_path, width, height, faces in db.iter_faces_for_xmp(conn):
-            try:
-                write_regions(
-                    Path(image_path), width, height, faces,
-                    keep_backup=not no_backup, dry_run=dry_run,
-                )
-                written += 1
-            except Exception:
-                logger.exception("Failed to write regions for %s", image_path)
-                failed += 1
 
-    click.echo(f"Wrote regions for {written} images ({failed} failed).")
+    stats = write_approved_regions(cfg.faces_db, keep_backup=not no_backup, dry_run=dry_run, resume=resume)
+
+    click.echo(f"Wrote regions for {stats['written']} images ({stats['failed']} failed).")
+    if resume and stats["skipped_already_exported"]:
+        click.echo(
+            f"Skipped {stats['skipped_already_exported']} image(s) already exported by "
+            "a previous, interrupted run."
+        )
     if pending:
         click.echo(
             f"{pending} detected face(s) are still pending review and were skipped. "

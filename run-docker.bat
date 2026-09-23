@@ -201,12 +201,31 @@ goto :done
 :do_infer
 echo.
 echo --- Schritt 3: Gesichtserkennung auf Fotobibliothek anwenden ---
+echo Fortsetzen: bereits verarbeitete, unveraenderte Bilder werden uebersprungen
+echo   -- so laeuft ein zuvor abgebrochener Lauf einfach weiter.
+echo Neu starten: die GESAMTE Bibliothek wird neu verarbeitet -- das setzt alle
+echo   bisherigen Review-Entscheidungen auf "pending" zurueck.
+set "INFER_MODE="
+set /p INFER_MODE="Fortsetzen oder neu starten? (f/n, Enter = fortsetzen): "
+set "INFER_RESTART_FLAG="
+if /i "%INFER_MODE%"=="n" (
+    echo.
+    echo WARNUNG: Neustart verarbeitet die komplette Bibliothek neu und setzt
+    echo ALLE bisherigen Review-Entscheidungen auf "pending" zurueck.
+    set "INFER_RESTART_CONFIRM="
+    set /p INFER_RESTART_CONFIRM="Wirklich neu starten? (j/n): "
+    if /i "!INFER_RESTART_CONFIRM!"=="j" (
+        set "INFER_RESTART_FLAG=--restart"
+    ) else (
+        echo Abgebrochen -- es wird stattdessen fortgesetzt.
+    )
+)
 set "INFER_LIMIT="
 set /p INFER_LIMIT="Nur Testlauf mit wie vielen Bildern? (Enter = komplette Bibliothek): "
 if "%INFER_LIMIT%"=="" (
-    docker compose -f "%COMPOSE_FILE%" --profile %PROFILE% run --rm %SERVICE% run-inference
+    docker compose -f "%COMPOSE_FILE%" --profile %PROFILE% run --rm %SERVICE% run-inference %INFER_RESTART_FLAG%
 ) else (
-    docker compose -f "%COMPOSE_FILE%" --profile %PROFILE% run --rm %SERVICE% run-inference --limit %INFER_LIMIT%
+    docker compose -f "%COMPOSE_FILE%" --profile %PROFILE% run --rm %SERVICE% run-inference --limit %INFER_LIMIT% %INFER_RESTART_FLAG%
 )
 docker compose -f "%COMPOSE_FILE%" --profile %PROFILE% run --rm %SERVICE% status
 goto :done
@@ -229,12 +248,22 @@ goto :done
 :do_xmp
 echo.
 echo --- Schritt 5: Ergebnisse als XMP nach Lightroom schreiben ---
+echo Fortsetzen: falls ein vorheriger Lauf abgebrochen wurde, werden bereits
+echo   geschriebene Bilder uebersprungen und es wird dort weitergemacht.
+echo Neu starten: alle freigegebenen Gesichter werden erneut geschrieben (das
+echo   ist unschaedlich -- exiftool aktualisiert vorhandene Bereiche nur).
+set "XMP_MODE="
+set /p XMP_MODE="Fortsetzen oder neu starten? (f/n, Enter = neu starten): "
+set "XMP_RESUME_FLAG="
+if /i "%XMP_MODE%"=="f" set "XMP_RESUME_FLAG=--resume"
+
+echo.
 echo Zuerst ein Probelauf ^(dry-run^), es wird noch nichts geschrieben:
-docker compose -f "%COMPOSE_FILE%" --profile %PROFILE% run --rm %SERVICE% write-xmp --dry-run
+docker compose -f "%COMPOSE_FILE%" --profile %PROFILE% run --rm %SERVICE% write-xmp --dry-run %XMP_RESUME_FLAG%
 echo.
 set /p XMP_CONFIRM="Jetzt wirklich schreiben? (j/n): "
 if /i "%XMP_CONFIRM%"=="j" (
-    docker compose -f "%COMPOSE_FILE%" --profile %PROFILE% run --rm %SERVICE% write-xmp
+    docker compose -f "%COMPOSE_FILE%" --profile %PROFILE% run --rm %SERVICE% write-xmp %XMP_RESUME_FLAG%
     echo.
     echo Fertig. In Lightroom: betroffene Fotos auswaehlen, dann
     echo   Metadaten ^> Metadaten aus Datei lesen
@@ -265,5 +294,5 @@ goto :menu
 
 :end_ok
 echo.
-echo Auf Wiedersehen!
+echo Auf Wiedersehen.
 exit /b 0

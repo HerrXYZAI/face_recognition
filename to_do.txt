@@ -1,0 +1,3 @@
+#- gui fix multi selection in grid view and add buttons to approve all selected pictures at once to specific name
+#- when exporting xmp files, in local database mark which xmps are already exported. this is needed to be able to stop export and continue later. when last xmp is written, delete all markings in databse, so when export is clicked the next time it starts again doing all again. in run-docker.bat, when selecting "write xmp", add a 2nd question if want to continue or start again
+#- when detecting faces, mark them in databsae. this should make it possible to continue  if process is stopped. in run-docker.bat, when selecting this method, add a additional question if continue or restart later

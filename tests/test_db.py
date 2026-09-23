@@ -133,6 +133,38 @@ def test_review_counts(tmp_path: Path):
         assert db.review_counts(conn) == {"pending": 0, "approved": 1, "rejected": 1}
 
 
+def test_iter_faces_for_xmp_skip_exported_and_clear_marks(tmp_path: Path):
+    db_path = tmp_path / "faces.db"
+
+    with db.connect(db_path) as conn:
+        img_a = db.upsert_image(conn, "/photos/a.jpg", 800, 600, 1.0, "t0")
+        db.insert_face(conn, img_a, 0, 0, 10, 10, np.ones(512, dtype=np.float32), "Alice", 0.9, 0.9, "v1")
+        alice_id = conn.execute("SELECT id FROM faces WHERE person_name = 'Alice'").fetchone()["id"]
+        db.set_review_status(conn, alice_id, "approved", reviewed_at="t")
+
+        img_b = db.upsert_image(conn, "/photos/b.jpg", 800, 600, 1.0, "t0")
+        db.insert_face(conn, img_b, 0, 0, 10, 10, np.ones(512, dtype=np.float32), "Bob", 0.9, 0.9, "v1")
+        bob_id = conn.execute("SELECT id FROM faces WHERE person_name = 'Bob'").fetchone()["id"]
+        db.set_review_status(conn, bob_id, "approved", reviewed_at="t")
+
+    with db.connect(db_path) as conn:
+        assert len(list(db.iter_faces_for_xmp(conn))) == 2
+
+        # Marking a.jpg as already exported (simulating an interrupted
+        # write-xmp run) hides it from a skip_exported=True query -- what a
+        # resumed run uses to avoid redoing it -- but not from the default.
+        db.mark_xmp_exported(conn, "/photos/a.jpg", "2024-01-01T00:00:00")
+        assert len(list(db.iter_faces_for_xmp(conn))) == 2
+        remaining = list(db.iter_faces_for_xmp(conn, skip_exported=True))
+        assert len(remaining) == 1
+        assert remaining[0][0] == "/photos/b.jpg"
+
+        # Clearing marks (done once a write-xmp pass finishes) makes both
+        # images visible again, as if nothing had ever been exported.
+        db.clear_xmp_exported_marks(conn)
+        assert len(list(db.iter_faces_for_xmp(conn, skip_exported=True))) == 2
+
+
 def test_distinct_person_names_excludes_unknown(tmp_path: Path):
     db_path = tmp_path / "faces.db"
 

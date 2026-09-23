@@ -22,7 +22,8 @@ CREATE TABLE IF NOT EXISTS images (
     width INTEGER NOT NULL,
     height INTEGER NOT NULL,
     mtime REAL NOT NULL,
-    processed_at TEXT NOT NULL
+    processed_at TEXT NOT NULL,
+    xmp_exported_at TEXT
 );
 
 CREATE TABLE IF NOT EXISTS faces (
@@ -59,6 +60,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE faces ADD COLUMN reviewed_at TEXT")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_faces_review_status ON faces(review_status)")
 
+    image_cols = {row["name"] for row in conn.execute("PRAGMA table_info(images)")}
+    if "xmp_exported_at" not in image_cols:
+        conn.execute("ALTER TABLE images ADD COLUMN xmp_exported_at TEXT")
+
 
 @contextmanager
 def connect(db_path: Path) -> Iterator[sqlite3.Connection]:
@@ -78,6 +83,21 @@ def connect(db_path: Path) -> Iterator[sqlite3.Connection]:
 def get_processed_mtime(conn: sqlite3.Connection, path: str) -> Optional[float]:
     row = conn.execute("SELECT mtime FROM images WHERE path = ?", (path,)).fetchone()
     return row["mtime"] if row else None
+
+
+def mark_xmp_exported(conn: sqlite3.Connection, image_path: str, exported_at: str) -> None:
+    """Records that `image_path`'s approved faces were just written out by
+    write-xmp, so a later resumed run can skip it via
+    `iter_faces_for_xmp(..., skip_exported=True)`."""
+    conn.execute("UPDATE images SET xmp_exported_at = ? WHERE path = ?", (exported_at, image_path))
+
+
+def clear_xmp_exported_marks(conn: sqlite3.Connection) -> None:
+    """Clears every xmp-export mark. Called once a write-xmp pass has gone
+    through every candidate image (whether resumed or not), so the marks
+    only ever reflect an in-progress/interrupted run -- the next invocation
+    always starts from a clean slate."""
+    conn.execute("UPDATE images SET xmp_exported_at = NULL")
 
 
 def upsert_image(
@@ -116,7 +136,7 @@ def insert_face(
     )
 
 
-def iter_faces_for_xmp(conn: sqlite3.Connection):
+def iter_faces_for_xmp(conn: sqlite3.Connection, skip_exported: bool = False):
     """Yields (image_path, width, height, [(person_name, left, top, right, bottom), ...])
     for every image that has at least one *approved* face -- used by the
     write-xmp step. Only faces a human has approved via `review-faces` are
@@ -124,15 +144,22 @@ def iter_faces_for_xmp(conn: sqlite3.Connection):
     this on its own, since approval is a strictly stronger signal (it can
     also rescue a low-confidence face the classifier under-scored). Bounding
     boxes are converted from the pixel coordinates stored in `faces` to the
-    fractional (0..1) coordinates the MWG region writer expects."""
-    rows = conn.execute(
+    fractional (0..1) coordinates the MWG region writer expects.
+
+    skip_exported=True excludes images already marked via
+    `mark_xmp_exported` -- used to resume a write-xmp run that was
+    interrupted partway through without redoing what it already wrote."""
+    query = (
         """SELECT img.path AS path, img.width AS width, img.height AS height,
                   f.person_name AS person_name, f.left AS left, f.top AS top,
                   f.right AS right, f.bottom AS bottom, f.confidence AS confidence
            FROM faces f JOIN images img ON img.id = f.image_id
-           WHERE f.review_status = 'approved' AND f.person_name != 'unknown'
-           ORDER BY img.path""",
-    ).fetchall()
+           WHERE f.review_status = 'approved' AND f.person_name != 'unknown'"""
+    )
+    if skip_exported:
+        query += " AND img.xmp_exported_at IS NULL"
+    query += " ORDER BY img.path"
+    rows = conn.execute(query).fetchall()
 
     current_path = None
     current_dims = None

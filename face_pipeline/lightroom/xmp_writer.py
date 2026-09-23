@@ -20,6 +20,7 @@ after running this step, so the new regions and names appear.
 """
 from __future__ import annotations
 
+import datetime
 import json
 import logging
 import shutil
@@ -28,6 +29,7 @@ from pathlib import Path
 from typing import Optional
 
 from face_pipeline.imaging import iou
+from face_pipeline.pipeline import db
 
 logger = logging.getLogger(__name__)
 
@@ -210,3 +212,56 @@ def write_regions(
         len(region_items), target, len(faces), len(region_items) - len(faces),
     )
     return target
+
+
+def write_approved_regions(
+    faces_db_path: Path,
+    keep_backup: bool = True,
+    dry_run: bool = False,
+    resume: bool = False,
+) -> dict:
+    """Writes MWG face regions for every image with at least one approved
+    face -- the loop behind the `write-xmp` CLI command.
+
+    Each image is marked as exported in faces.db right after it's written
+    (see `db.mark_xmp_exported`), so if this is interrupted partway through
+    (killed, container stopped, etc.), a later call with resume=True skips
+    whatever already got written and continues from there instead of
+    redoing the whole library. A pass that reaches every candidate image --
+    resumed or not -- always clears every mark on the way out (see
+    `db.clear_xmp_exported_marks`), so the marks only ever reflect an
+    in-progress run: the next invocation, resumed or not, starts from a
+    clean slate. dry_run never marks/clears anything, and previews exactly
+    what the equivalent real run (resumed or not) would process."""
+    stats = {"written": 0, "failed": 0, "skipped_already_exported": 0}
+    with db.connect(faces_db_path) as conn:
+        if resume:
+            total = len(list(db.iter_faces_for_xmp(conn, skip_exported=False)))
+            rows = list(db.iter_faces_for_xmp(conn, skip_exported=True))
+            stats["skipped_already_exported"] = total - len(rows)
+        else:
+            if not dry_run:
+                db.clear_xmp_exported_marks(conn)
+                conn.commit()
+            rows = list(db.iter_faces_for_xmp(conn, skip_exported=False))
+
+        for image_path, width, height, faces in rows:
+            try:
+                write_regions(
+                    Path(image_path), width, height, faces,
+                    keep_backup=keep_backup, dry_run=dry_run,
+                )
+            except Exception:
+                logger.exception("Failed to write regions for %s", image_path)
+                stats["failed"] += 1
+                continue
+            stats["written"] += 1
+            if not dry_run:
+                exported_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                db.mark_xmp_exported(conn, image_path, exported_at)
+                conn.commit()
+
+        if not dry_run:
+            db.clear_xmp_exported_marks(conn)
+            conn.commit()
+    return stats

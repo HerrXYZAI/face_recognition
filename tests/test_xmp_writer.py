@@ -4,6 +4,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from face_pipeline.lightroom.xmp_writer import (
@@ -13,8 +14,10 @@ from face_pipeline.lightroom.xmp_writer import (
     _region_struct_item,
     require_exiftool,
     target_path_for,
+    write_approved_regions,
     write_regions,
 )
+from face_pipeline.pipeline import db
 
 HAS_EXIFTOOL = shutil.which("exiftool") is not None
 
@@ -114,3 +117,94 @@ def test_write_regions_second_call_attaches_instead_of_overwriting(tmp_path: Pat
     assert result.returncode == 0
     assert "Alice" in result.stdout
     assert "Bob" in result.stdout
+
+
+def _setup_two_approved_faces(db_path: Path, tmp_path: Path) -> tuple[Path, Path]:
+    """Two images, each with one approved face, as write_approved_regions
+    would find them via db.iter_faces_for_xmp."""
+    image_a = tmp_path / "a.cr2"
+    image_a.write_bytes(b"not a real raw file, just needs to exist as a path")
+    image_b = tmp_path / "b.cr2"
+    image_b.write_bytes(b"not a real raw file, just needs to exist as a path")
+
+    with db.connect(db_path) as conn:
+        img_a = db.upsert_image(conn, str(image_a), 1000, 800, 1.0, "t0")
+        db.insert_face(conn, img_a, 100, 100, 300, 300, np.zeros(512, dtype=np.float32), "Alice", 0.9, 0.9, "v1")
+        alice_id = conn.execute("SELECT id FROM faces WHERE person_name = 'Alice'").fetchone()["id"]
+        db.set_review_status(conn, alice_id, "approved", reviewed_at="t")
+
+        img_b = db.upsert_image(conn, str(image_b), 1000, 800, 1.0, "t0")
+        db.insert_face(conn, img_b, 100, 100, 300, 300, np.zeros(512, dtype=np.float32), "Bob", 0.9, 0.9, "v1")
+        bob_id = conn.execute("SELECT id FROM faces WHERE person_name = 'Bob'").fetchone()["id"]
+        db.set_review_status(conn, bob_id, "approved", reviewed_at="t")
+
+    return image_a, image_b
+
+
+def _exported_marks(db_path: Path) -> list:
+    with db.connect(db_path) as conn:
+        return [row["xmp_exported_at"] for row in conn.execute("SELECT xmp_exported_at FROM images ORDER BY path")]
+
+
+@pytest.mark.skipif(not HAS_EXIFTOOL, reason="exiftool not installed")
+def test_write_approved_regions_full_run_clears_marks_on_completion(tmp_path: Path):
+    db_path = tmp_path / "faces.db"
+    image_a, image_b = _setup_two_approved_faces(db_path, tmp_path)
+
+    stats = write_approved_regions(db_path)
+    assert stats == {"written": 2, "failed": 0, "skipped_already_exported": 0}
+    assert image_a.with_suffix(".xmp").exists()
+    assert image_b.with_suffix(".xmp").exists()
+
+    # A run that reaches every candidate image clears all marks on the way
+    # out, even though nothing here was interrupted -- the next invocation
+    # (resumed or not) should see nothing pre-exported.
+    assert _exported_marks(db_path) == [None, None]
+
+
+@pytest.mark.skipif(not HAS_EXIFTOOL, reason="exiftool not installed")
+def test_write_approved_regions_resume_skips_already_exported(tmp_path: Path):
+    db_path = tmp_path / "faces.db"
+    image_a, image_b = _setup_two_approved_faces(db_path, tmp_path)
+
+    # Simulate an interrupted first run: a.cr2 already marked exported,
+    # b.cr2 never got there.
+    with db.connect(db_path) as conn:
+        db.mark_xmp_exported(conn, str(image_a), "2024-01-01T00:00:00")
+
+    stats = write_approved_regions(db_path, resume=True)
+    assert stats["written"] == 1
+    assert stats["skipped_already_exported"] == 1
+    assert not image_a.with_suffix(".xmp").exists()  # skipped, untouched
+    assert image_b.with_suffix(".xmp").exists()
+
+    # Completing the resumed run clears every mark, a.cr2's included.
+    assert _exported_marks(db_path) == [None, None]
+
+
+@pytest.mark.skipif(not HAS_EXIFTOOL, reason="exiftool not installed")
+def test_write_approved_regions_dry_run_previews_without_marking(tmp_path: Path):
+    db_path = tmp_path / "faces.db"
+    image_a, image_b = _setup_two_approved_faces(db_path, tmp_path)
+
+    stats = write_approved_regions(db_path, dry_run=True)
+    assert stats["written"] == 2
+    assert not image_a.with_suffix(".xmp").exists()
+    assert not image_b.with_suffix(".xmp").exists()
+    assert _exported_marks(db_path) == [None, None]  # dry-run marks/clears nothing
+
+
+@pytest.mark.skipif(not HAS_EXIFTOOL, reason="exiftool not installed")
+def test_write_approved_regions_default_ignores_stale_marks_from_a_prior_interrupted_run(tmp_path: Path):
+    db_path = tmp_path / "faces.db"
+    image_a, image_b = _setup_two_approved_faces(db_path, tmp_path)
+
+    with db.connect(db_path) as conn:
+        db.mark_xmp_exported(conn, str(image_a), "2024-01-01T00:00:00")
+
+    # resume=False (the default, i.e. "start again") reprocesses everything,
+    # a.cr2 included, even though a previous interrupted run had marked it.
+    stats = write_approved_regions(db_path, resume=False)
+    assert stats["written"] == 2
+    assert image_a.with_suffix(".xmp").exists()
+    assert image_b.with_suffix(".xmp").exists()
